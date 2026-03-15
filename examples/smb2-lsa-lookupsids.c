@@ -92,14 +92,14 @@ void ls_cb(struct dcerpc_context *dce, int status,
         printf("   Entries:%d\n", rep->ReferencedDomains.Entries);
         printf("   MaxEntries:%d\n", rep->ReferencedDomains.MaxEntries);
         for(i = 0; i < rep->ReferencedDomains.Entries; i++) {
-                printf("   Name:%s SID:", rep->ReferencedDomains.Domains[i].Name);
+                printf("   Name:%s SID:", rep->ReferencedDomains.Domains[i].Name.utf8);
                 print_sid(&rep->ReferencedDomains.Domains[i].Sid);
                 printf("\n");
         }
         printf("TranslatedNames\n");
         printf("   Entries:%d\n", rep->TranslatedNames.Entries);
         for(i = 0; i < rep->TranslatedNames.Entries; i++) {
-                printf("   Name:%s DomainIndex:%d\n", rep->TranslatedNames.Names[i].Name, rep->TranslatedNames.Names[i].DomainIndex);
+                printf("   Name:%s DomainIndex:%d\n", rep->TranslatedNames.Names[i].Name.utf8, rep->TranslatedNames.Names[i].DomainIndex);
         }
 
         memcpy(&cl_req.PolicyHandle, &PolicyHandle,

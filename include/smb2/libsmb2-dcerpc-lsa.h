@@ -53,7 +53,7 @@ typedef struct RPC_SID {
 
 typedef struct _LSAPR_TRANSLATED_NAME_EX {
         uint32_t Use;
-        char *Name;
+        struct dcerpc_utf16 Name; /* decoded via dcerpc_utf16_coder; access .utf8 */
         uint32_t DomainIndex;
         uint32_t Flags;
 } LSAPR_TRANSLATED_NAME_EX, *PLSAPR_TRANSLATED_NAME_EX;
@@ -79,7 +79,7 @@ typedef enum _LSAP_LOOKUP_LEVEL {
 } LSAP_LOOKUP_LEVEL, *PLSAP_LOOKUP_LEVEL;
 
 typedef struct _LSAPR_TRUST_INFORMATION {
-        char *Name;
+        struct dcerpc_utf16 Name; /* decoded via dcerpc_utf16_coder; access .utf8 */
         RPC_SID Sid;
 } LSAPR_TRUST_INFORMATION, *PLSAPR_TRUST_INFORMATION;
 

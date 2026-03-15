@@ -224,7 +224,9 @@ lsa_RPC_UNICODE_STRING_coder(struct dcerpc_context *dce,
         *offset = dcerpc_align_3264(dce, *offset);
 
         if (dcerpc_pdu_direction(pdu) == DCERPC_ENCODE) {
-                len = (uint16_t)strlen(*(char **)ptr) * 2;
+                struct dcerpc_utf16 *s = ptr;
+                const char *str = (s->utf8 != NULL) ? s->utf8 : "";
+                len = (uint16_t)strlen(str) * 2;
                 maxlen = (len & 0x02) ? len + 2 : len;
         }
         if (dcerpc_uint16_coder(dce, pdu, iov, offset, &len)) {
@@ -244,7 +246,7 @@ lsa_RPC_UNICODE_STRING_coder(struct dcerpc_context *dce,
 /*
  * typedef struct _LSAPR_TRANSLATED_NAME_EX {
  *      SID_NAME_USE Use;
- *      RPC_UNICODE_STRING Name;
+ *      RPC_UNICODE_STRING Name;  (stored as struct dcerpc_utf16; access .utf8)
  *      uint32_t DomainIndex;
  *      uint32_t Flags;
  * } LSAPR_TRANSLATED_NAME_EX, *PLSAPR_TRANSLATED_NAME_EX;
@@ -470,7 +472,7 @@ lsa_OpenPolicy2_rep_coder(struct dcerpc_context *dce,
 
 /*
  * typedef struct _LSAPR_TRUST_INFORMATION {
- *       RPC_UNICODE_STRING Name;
+ *       RPC_UNICODE_STRING Name;  (stored as struct dcerpc_utf16; access .utf8)
  *       PRPC_SID Sid;
  * } LSAPR_TRUST_INFORMATION, *PLSAPR_TRUST_INFORMATION;
 */

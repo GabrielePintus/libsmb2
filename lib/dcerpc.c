@@ -1059,12 +1059,16 @@ dcerpc_decode_utf16(struct dcerpc_context *ctx, struct dcerpc_pdu *pdu,
         tmp = smb2_utf16_to_utf8((uint16_t *)(void *)(&iov->buf[*offset]), (size_t)s->actual_count);
         *offset += (int)s->actual_count * 2;
 
+        if (tmp == NULL) {
+                return -1;
+        }
+
         str = smb2_alloc_data(ctx->smb2, pdu->payload, strlen(tmp) + 1);
         if (str == NULL) {
                 free(discard_const(tmp));
                 return -1;
         }
-        strcat(str, tmp);
+        memcpy(str, tmp, strlen(tmp) + 1);
         free(discard_const(tmp));
 
         s->utf8 = str;

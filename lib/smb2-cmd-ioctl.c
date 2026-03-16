@@ -308,14 +308,19 @@ smb2_process_ioctl_variable(struct smb2_context *smb2,
         struct smb2_ioctl_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         struct smb2_iovec vec;
+        size_t output_offset;
         void *ptr;
 
-        if (rep->output_count > iov->len - IOV_OFFSET_IOCTL) {
+        output_offset = IOV_OFFSET_IOCTL;
+        if (output_offset > iov->len) {
+                return -EINVAL;
+        }
+        if ((size_t)rep->output_count > iov->len - output_offset) {
                 return -EINVAL;
         }
 
-        vec.buf = &iov->buf[IOV_OFFSET_IOCTL];
-        vec.len = iov->len - IOV_OFFSET_IOCTL;
+        vec.buf = &iov->buf[output_offset];
+        vec.len = rep->output_count;
 
         switch (rep->ctl_code) {
         case SMB2_FSCTL_GET_REPARSE_POINT:
@@ -333,7 +338,7 @@ smb2_process_ioctl_variable(struct smb2_context *smb2,
                 if (ptr == NULL) {
                         return -ENOMEM;
                 }
-                memcpy(ptr, &iov->buf[IOV_OFFSET_IOCTL], iov->len - IOV_OFFSET_IOCTL);
+                memcpy(ptr, &iov->buf[output_offset], rep->output_count);
         }
 
         rep->output = ptr;
@@ -442,4 +447,3 @@ smb2_process_ioctl_request_variable(struct smb2_context *smb2,
         req->input = ptr;
         return 0;
 }
-

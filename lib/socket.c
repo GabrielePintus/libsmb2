@@ -457,6 +457,14 @@ read_more_data:
                         smb2->recv_state = SMB2_RECV_TRFM;
                         goto read_more_data;
                 }
+                /*
+                 * Once an encrypted session/share is active, incoming SMB2
+                 * PDUs must arrive inside a transform header.
+                 */
+                if (smb2->seal && !has_xfrmhdr && smb2->session_id != 0) {
+                        smb2_set_error(smb2, "Received unencrypted SMB2 PDU while encryption is required");
+                        return -1;
+                }
                 if (smb2_decode_header(smb2, &smb2->in.iov[smb2->in.niov - 1],
                                        &smb2->hdr) != 0) {
                         smb2_set_error(smb2, "Failed to decode smb2 "
@@ -857,8 +865,12 @@ read_more_data:
          * of the final leg of session setup.
          */
         if (smb2->sign &&
-            (smb2->hdr.flags & SMB2_FLAGS_SIGNED) &&
-            (smb2->hdr.command != SMB2_SESSION_SETUP) ) {
+            smb2->session_id != 0 &&
+            (smb2->hdr.command != SMB2_SESSION_SETUP)) {
+                if (!(smb2->hdr.flags & SMB2_FLAGS_SIGNED)) {
+                        smb2_set_error(smb2, "Received unsigned SMB2 PDU while signing is required");
+                        return -1;
+                }
                 uint8_t signature[16] _U_;
                 memcpy(&signature[0], &smb2->in.iov[1 + iov_offset].buf[48], 16);
                 if (smb2_calc_signature(smb2, &smb2->in.iov[1 + iov_offset].buf[48],

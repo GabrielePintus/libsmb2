@@ -342,135 +342,194 @@ static int
 ntlm_decode_challenge_message(struct smb2_context *smb2, struct auth_data *auth_data,
                         unsigned char *buf, size_t len)
 {
-        if (buf && len > 0) {
-                int alloc_len;
-                uint32_t inoff;
-                uint16_t inlen;
-                uint32_t outoff;
-                uint16_t u16;
-                uint32_t u32;
-                uint16_t infolen;
-                uint16_t attr_len;
-                uint16_t attr_code;
-                struct smb2_utf16 *utf16_spn = NULL;
-                const uint32_t challenge_header_len = 56;
+        size_t alloc_len;
+        size_t inoff;
+        size_t inlen;
+        size_t outoff;
+        size_t infolen;
+        uint16_t u16;
+        uint32_t u32;
+        uint16_t attr_len;
+        uint16_t attr_code;
+        struct smb2_utf16 *utf16_spn = NULL;
+        const size_t challenge_header_len = 56;
+        const char *server = smb2->server ? smb2->server : "";
 
-                /* form destination SPN in case server is checking */
+        if (buf == NULL || len < challenge_header_len) {
+                return -1;
+        }
+
+        /* Form destination SPN in case server is checking. */
+        free(auth_data->target_info);
+        auth_data->target_info = NULL;
+        if (strlen(server) > SIZE_MAX - sizeof("cifs/")) {
+                return -1;
+        }
+        alloc_len = strlen(server) + sizeof("cifs/");
+        auth_data->target_info = malloc(alloc_len);
+        if (!auth_data->target_info) {
+                return -1;
+        }
+        auth_data->target_info_len = snprintf((char *)auth_data->target_info,
+                                              alloc_len, "cifs/%s", server);
+        if (auth_data->target_info_len < 0 ||
+            (size_t)auth_data->target_info_len >= alloc_len) {
                 free(auth_data->target_info);
-                alloc_len = 32 + strlen(smb2->server);
-                auth_data->target_info = malloc(alloc_len);
-                if (!auth_data->target_info) {
+                auth_data->target_info = NULL;
+                auth_data->target_info_len = 0;
+                return -1;
+        }
+
+        free(auth_data->target_name);
+        auth_data->target_name = NULL;
+
+        free(auth_data->ntlm_buf);
+        auth_data->ntlm_buf = NULL;
+        auth_data->ntlm_len = len;
+
+        /* Allocate enough room to append a target-name attribute. */
+        if (auth_data->ntlm_len > SIZE_MAX - 400) {
+                return -1;
+        }
+        alloc_len = auth_data->ntlm_len + 400;
+        auth_data->ntlm_buf = malloc(alloc_len);
+        if (auth_data->ntlm_buf == NULL) {
+                return -1;
+        }
+
+        /* Copy challenge message verbatim except payload. */
+        memcpy(auth_data->ntlm_buf, buf, challenge_header_len);
+
+        /* Payload pointer. */
+        outoff = challenge_header_len;
+
+        /* Copy target-name-fields payload from source to dest. */
+        memcpy(&u16, &buf[12], 2);
+        inlen = le16toh(u16);
+        memcpy(&u32, &buf[16], 4);
+        inoff = le32toh(u32);
+
+        if (outoff > UINT32_MAX) {
+                return -1;
+        }
+        u32 = htole32((uint32_t)outoff);
+        memcpy(&auth_data->ntlm_buf[16], &u32, 4);
+
+        if (inlen > 0 &&
+            inoff <= len &&
+            inlen <= len - inoff &&
+            outoff <= alloc_len &&
+            inlen <= alloc_len - outoff) {
+                if ((inlen & 0x1) == 0) {
+                        auth_data->target_name = discard_const(smb2_utf16_to_utf8(
+                                (const uint16_t *)(void *)&buf[inoff], inlen / 2));
+                }
+                memcpy(&auth_data->ntlm_buf[outoff], &buf[inoff], inlen);
+                outoff += inlen;
+        }
+
+        memcpy(&u16, &buf[40], 2);
+        inlen = le16toh(u16);
+        memcpy(&u32, &buf[44], 4);
+        inoff = le32toh(u32);
+        infolen = 0;
+
+        if (inlen > 0 &&
+            inoff <= len &&
+            inlen <= len - inoff) {
+                /* Back annotate target info field offset. */
+                if (outoff > UINT32_MAX) {
                         return -1;
                 }
-                auth_data->target_info_len = snprintf((char*)auth_data->target_info,
-                        alloc_len, "cifs/%s", smb2->server);
+                u32 = htole32((uint32_t)outoff);
+                memcpy(&auth_data->ntlm_buf[44], &u32, 4);
 
-                free(auth_data->ntlm_buf);
-                auth_data->ntlm_len = len;
-                /* alloc enough to add a target-name attribute */
-                alloc_len = auth_data->ntlm_len + 400;
-                auth_data->ntlm_buf = malloc(alloc_len);
-                if (auth_data->ntlm_buf == NULL) {
-                        return -1;
-                }
-                /* copy challenge message verbatim except payload */
-                memcpy(auth_data->ntlm_buf, buf, challenge_header_len);
+                /* Transcode target info fields, appending our target-name. */
+                while (inlen > 0) {
+                        if (inlen < 4 || inoff > len - 4) {
+                                return -1;
+                        }
 
-                /* payload pointer */
-                outoff = challenge_header_len;
+                        memcpy(&u16, &buf[inoff], 2);
+                        attr_code = le16toh(u16);
+                        memcpy(&u16, &buf[inoff + 2], 2);
+                        attr_len = le16toh(u16);
+                        inoff += 4;
+                        inlen -= 4;
 
-                /* copy target-name-fields payload from source to dest */
-                memcpy(&u16, &buf[12], 2);
-                inlen = htole16(u16);
-                memcpy(&u32, &buf[16], 4);
-                inoff = htole32(u32);
+                        if (attr_len > inlen || inoff > len - attr_len) {
+                                return -1;
+                        }
 
-                /* and update offset to where we put it (probably the same offset) */
-                u32 = htole32(outoff);
-                memcpy(&auth_data->ntlm_buf[16], &u32, 4);
+                        if (attr_code == 0) { /* end of list */
+                                if (auth_data->target_info && auth_data->target_info_len) {
+                                        utf16_spn = smb2_utf8_to_utf16((char *)auth_data->target_info);
+                                        if (utf16_spn != NULL) {
+                                                size_t spn_len = utf16_spn->len * 2;
 
-                if (inlen > 0 && inlen < len && (outoff + inlen) < alloc_len) {
-                        auth_data->target_name = discard_const(smb2_utf16_to_utf8((const uint16_t *)(void *)&buf[inoff], inlen / 2));
-                        memcpy(&auth_data->ntlm_buf[outoff], &buf[inoff], inlen);
-                        outoff += inlen;
-                }
-
-                memcpy(&u16, &buf[40], 2);
-                inlen = htole16(u16);
-                memcpy(&u32, &buf[44], 4);
-                inoff = htole32(u32);
-
-                infolen = 0;
-
-                if (inlen > 0 && inlen < len && (outoff + inlen) < alloc_len) {
-                        /* back annotate target info field offset */
-                        u32 = htole32(outoff);
-                        memcpy(&auth_data->ntlm_buf[44], &u32, 4);
-
-                        /* transcode target info fields, appending our target-name */
-                        while (inlen > 0) {
-                                memcpy(&u16, &buf[inoff], 2);
-                                attr_code = htole16(u16);
-                                memcpy(&u16, &buf[inoff + 2], 2);
-                                attr_len = htole16(u16);
-                                if (attr_len > inlen || (outoff + attr_len) > alloc_len) {
-                                        /* invalid, must be out of parse? */
-                                        break;
-                                }
-
-                                if (attr_code == 0) { /* end of list */
-                                        /*  insert target-name */
-                                        if (auth_data->target_info && auth_data->target_info_len) {
-                                                utf16_spn = smb2_utf8_to_utf16((char*)auth_data->target_info);
-                                                if (utf16_spn != NULL) {
-                                                        attr_code = 0x9; /* target-name code */
-                                                        attr_len = utf16_spn->len * 2;
-                                                        u16 = htole16(attr_code);
+                                                if (spn_len <= UINT16_MAX &&
+                                                    outoff <= alloc_len &&
+                                                    (4 + spn_len) <= alloc_len - outoff &&
+                                                    infolen <= SIZE_MAX - (4 + spn_len)) {
+                                                        u16 = htole16(0x9);
                                                         memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
-                                                        u16 = htole16(attr_len);
+                                                        u16 = htole16((uint16_t)spn_len);
                                                         memcpy(&auth_data->ntlm_buf[outoff + 2], &u16, 2);
                                                         outoff += 4;
                                                         memcpy(&auth_data->ntlm_buf[outoff],
-                                                                (uint8_t*)utf16_spn->val, attr_len);
-                                                        outoff += attr_len;
-                                                        infolen += 4 + attr_len;
-                                                        free(utf16_spn);
+                                                               (uint8_t *)utf16_spn->val, spn_len);
+                                                        outoff += spn_len;
+                                                        infolen += 4 + spn_len;
                                                 }
+                                                free(utf16_spn);
                                         }
-                                        /* insert original end of list attr */
-                                        u16 = 0;
-                                        memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
-                                        memcpy(&auth_data->ntlm_buf[outoff + 2], &u16, 2);
-                                        outoff += 4;
-                                        attr_code = 0;
-                                        attr_len = 0;
-                                } else {
-                                        u16 = htole16(attr_code);
-                                        memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
-                                        u16 = htole16(attr_len);
-                                        memcpy(&auth_data->ntlm_buf[outoff + 2], &u16, 2);
-                                        outoff += 4;
-                                        memcpy(&auth_data->ntlm_buf[outoff], &buf[inoff + 4], attr_len);
-                                        outoff += attr_len;
                                 }
 
-                                inoff += 4 + attr_len;
-                                inlen -= 4 + attr_len;
+                                if (outoff > alloc_len ||
+                                    4 > alloc_len - outoff ||
+                                    infolen > SIZE_MAX - 4) {
+                                        return -1;
+                                }
+                                u16 = 0;
+                                memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
+                                memcpy(&auth_data->ntlm_buf[outoff + 2], &u16, 2);
+                                outoff += 4;
+                                infolen += 4;
+                                attr_len = 0;
+                        } else {
+                                if (outoff > alloc_len ||
+                                    (4 + attr_len) > alloc_len - outoff ||
+                                    infolen > SIZE_MAX - (4 + attr_len)) {
+                                        return -1;
+                                }
+                                u16 = htole16(attr_code);
+                                memcpy(&auth_data->ntlm_buf[outoff], &u16, 2);
+                                u16 = htole16(attr_len);
+                                memcpy(&auth_data->ntlm_buf[outoff + 2], &u16, 2);
+                                outoff += 4;
+                                memcpy(&auth_data->ntlm_buf[outoff], &buf[inoff], attr_len);
+                                outoff += attr_len;
                                 infolen += 4 + attr_len;
                         }
 
-                        /* back annotate target info field len */
-                        u16 = htole16(infolen);
-                        memcpy(&auth_data->ntlm_buf[40], &u16, 2);
-                        memcpy(&auth_data->ntlm_buf[42], &u16, 2);
-
-                        /* set the actual length of total message */
-                        auth_data->ntlm_len = outoff;
+                        inoff += attr_len;
+                        inlen -= attr_len;
                 }
-                return 0;
+
+                if (infolen > UINT16_MAX) {
+                        return -1;
+                }
+
+                /* Back annotate target info field len. */
+                u16 = htole16((uint16_t)infolen);
+                memcpy(&auth_data->ntlm_buf[40], &u16, 2);
+                memcpy(&auth_data->ntlm_buf[42], &u16, 2);
+
+                /* Set the actual length of total message. */
+                auth_data->ntlm_len = outoff;
         }
 
-        return -1;
+        return 0;
 }
 
 static int
@@ -1402,4 +1461,3 @@ ntlmssp_get_message_type(struct smb2_context *smb2,
         }
         return -1;
 }
-

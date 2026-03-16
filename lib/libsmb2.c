@@ -925,6 +925,15 @@ negotiate_cb(struct smb2_context *smb2, int status,
 
         if (rep->security_mode & SMB2_NEGOTIATE_SIGNING_REQUIRED) {
                 smb2->sign = 1;
+        } else if (rep->security_mode & SMB2_NEGOTIATE_SIGNING_ENABLED) {
+                /* Server supports signing but doesn't require it.
+                 * Opt in proactively so that PDU integrity verification
+                 * in smb2_read_data() (socket.c) is not silently skipped. */
+                smb2->sign = 1;
+        } else {
+                smb2_set_error(smb2,
+                        "WARNING: server does not support SMB2 signing. "
+                        "PDU integrity cannot be verified.");
         }
 
         if (smb2->seal) {

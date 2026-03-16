@@ -81,6 +81,13 @@
 #include "hmac-md5.h"
 #include "ntlmssp.h"
 
+/* Securely zero memory without compiler elision. */
+static void secure_zero(void *ptr, size_t len)
+{
+        volatile unsigned char *p = (volatile unsigned char *)ptr;
+        while (len--) *p++ = 0;
+}
+
 struct auth_data {
         unsigned char *buf;
         size_t len;
@@ -128,6 +135,9 @@ ntlmssp_destroy_context(struct auth_data *auth)
         free(auth->ntlm_buf);
         free(auth->buf);
         free(auth->user);
+        if (auth->password) {
+                secure_zero(auth->password, strlen(auth->password));
+        }
         free(auth->password);
         free(auth->domain);
         free(auth->workstation);
@@ -140,6 +150,9 @@ ntlmssp_destroy_context(struct auth_data *auth)
 static int
 auth_data_set_password(struct auth_data *auth_data, const char *password)
 {
+        if (auth_data->password) {
+                secure_zero(auth_data->password, strlen(auth_data->password));
+        }
         free(auth_data->password);
         auth_data->password = NULL;
 
@@ -218,6 +231,9 @@ ntlmssp_init_context(const char *user,
         return auth_data;
  failed:
         free(auth_data->user);
+        if (auth_data->password) {
+                secure_zero(auth_data->password, strlen(auth_data->password));
+        }
         free(auth_data->password);
         free(auth_data->domain);
         free(auth_data->workstation);
@@ -250,8 +266,14 @@ encoder(const void *buffer, size_t size, void *ptr)
 
         if (size + auth_data->len > auth_data->allocated) {
                 unsigned char *tmp = auth_data->buf;
+                size_t rounded;
 
-                auth_data->allocated = 2 * ((size + auth_data->allocated + 256) & ~0xff);
+                rounded = (size + auth_data->allocated + 256) & ~(size_t)0xff;
+                if (rounded > SIZE_MAX / 2) {
+                        free(tmp);
+                        return -1;
+                }
+                auth_data->allocated = 2 * rounded;
                 auth_data->buf = malloc(auth_data->allocated);
                 if (auth_data->buf == NULL) {
                         free(tmp);
@@ -532,14 +554,14 @@ NTOWFv2(const char *user, const char *password, const char *domain,
                 return -1;
         }
 
-        strcpy(userdomain, user);
+        snprintf(userdomain, len, "%s", user);
         for (i = strlen(userdomain) - 1; i >= 0; i--) {
                 if (islower((unsigned int) userdomain[i])) {
                         userdomain[i] = toupper((unsigned int) userdomain[i]);
                 }
         }
         if (domain) {
-                strcat(userdomain, domain);
+                strncat(userdomain, domain, len - strlen(user) - 1);
         }
 
         utf16_userdomain = smb2_utf8_to_utf16(userdomain);
@@ -975,6 +997,9 @@ encode_ntlm_challenge(struct smb2_context *smb2, struct auth_data *auth_data)
         /* save the target info in auth-data for later */
         auth_data->target_info_len = auth_data->len - target_info_pos;
         auth_data->target_info = malloc(auth_data->target_info_len);
+        if (auth_data->target_info == NULL) {
+                return -1;
+        }
         memcpy(auth_data->target_info,
                         auth_data->buf + target_info_pos,
                         auth_data->target_info_len);

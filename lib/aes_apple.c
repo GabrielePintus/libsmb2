@@ -33,7 +33,7 @@ void AES128_ECB_encrypt_apple(const uint8_t *input, const uint8_t *key, uint8_t 
     // Create an AES ECB encryption context
     CCCryptorStatus status = CCCryptorCreate(
         kCCEncrypt,         
-        kCCAlgorithmAES,     
+        kCCAlgorithmAES128,
         kCCOptionECBMode,     
         key,                   
         AES128_KEY_LEN,         

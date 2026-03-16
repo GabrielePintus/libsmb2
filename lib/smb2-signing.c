@@ -182,7 +182,17 @@ smb2_calc_signature(struct smb2_context *smb2, uint8_t *signature,
                 uint8_t *msg = NULL;
 
                 for (i=0; i < niov; i++) {
+                        if (iov[i].len > SMB2_MAX_PDU_SIZE - len) {
+                                smb2_set_error(smb2, "IOV length overflow in "
+                                               "signature calculation");
+                                return -1;
+                        }
                         len += iov[i].len;
+                }
+                if (len > SMB2_MAX_PDU_SIZE) {
+                        smb2_set_error(smb2, "Combined IOV size exceeds "
+                                       "maximum PDU size");
+                        return -1;
                 }
                 msg = (uint8_t *) malloc(len);
                 if (msg == NULL) {
@@ -275,5 +285,9 @@ smb2_pdu_check_signature(struct smb2_context *smb2,
                          struct smb2_pdu *pdu
                          )
 {
+        /* NOTE: Signature verification for received PDUs is performed
+         * inline in smb2_read_data() (socket.c), gated by smb2->sign.
+         * This function is currently unused. */
+        (void)smb2; (void)pdu;
         return 0;
 }

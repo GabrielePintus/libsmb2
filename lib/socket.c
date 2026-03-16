@@ -419,10 +419,24 @@ read_more_data:
                 }
                 goto read_more_data;
         case SMB2_RECV_HEADER:
+                if (smb2->in.niov < 1) {
+                        smb2_set_error(smb2, "RECV_HEADER: iov array empty");
+                        return -1;
+                }
                 if (!memcmp(smb2->in.iov[smb2->in.niov - 1].buf, smb3tfrm, 4)) {
                         smb2->in.iov[smb2->in.niov - 1].len = 52;
+                        if (smb2->spl < 52) {
+                                smb2_set_error(smb2, "TRFM: SPL value %u too small",
+                                               smb2->spl);
+                                return -1;
+                        }
                         len = smb2->spl - 52;
                         smb2->in.total_size -= 12;
+                        if (len > SMB2_MAX_PDU_SIZE) {
+                                smb2_set_error(smb2, "TRFM payload exceeds "
+                                               "maximum PDU size");
+                                return -1;
+                        }
                         {
                                 uint8_t *tmp = malloc(len);
                                 if (tmp == NULL) {
@@ -433,6 +447,10 @@ read_more_data:
                                         smb2_set_error(smb2, "Failed to add iovector for TRFM payload");
                                         return -1;
                                 }
+                        }
+                        if (smb2->in.niov < 2) {
+                                smb2_set_error(smb2, "TRFM decrypt: insufficient iov");
+                                return -1;
                         }
                         memcpy(smb2->in.iov[smb2->in.niov - 1].buf,
                                &smb2->in.iov[smb2->in.niov - 2].buf[52], 12);
@@ -502,6 +520,12 @@ read_more_data:
                          * request sometime later.
                          */
 
+                        if (smb2->spl < smb2->in.num_done) {
+                                smb2_set_error(smb2, "PENDING: SPL underflow "
+                                               "(spl=%u num_done=%zu)",
+                                               smb2->spl, smb2->in.num_done);
+                                return -1;
+                        }
                         len = smb2->spl - smb2->in.num_done;
                         /* If we don't have a transform header we are reading
                          * straight from the socket, and not a buffer,
@@ -509,6 +533,11 @@ read_more_data:
                          */
                         if (!has_xfrmhdr) {
                                 len += SMB2_SPL_SIZE;
+                        }
+                        if (len > SMB2_MAX_PDU_SIZE) {
+                                smb2_set_error(smb2, "PENDING padding exceeds "
+                                               "maximum PDU size");
+                                return -1;
                         }
                         /* Add padding before the next PDU */
                         smb2->recv_state = SMB2_RECV_PAD;
@@ -556,6 +585,12 @@ read_more_data:
                                 }
                                 pdu = smb2->pdu = smb2_find_pdu(smb2, smb2->hdr.message_id);
                                 if (pdu == NULL) {
+                                        if (smb2->spl < smb2->in.num_done) {
+                                                smb2_set_error(smb2, "UNKNOWN PDU: SPL underflow "
+                                                               "(spl=%u num_done=%zu)",
+                                                               smb2->spl, smb2->in.num_done);
+                                                return -1;
+                                        }
                                         len = smb2->spl - smb2->in.num_done;
                                         if (!has_xfrmhdr) {
                                                 len += SMB2_SPL_SIZE;

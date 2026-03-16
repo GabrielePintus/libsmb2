@@ -68,8 +68,7 @@ smb2_decode_fileidfulldirectoryinformation(
          * vector.
          */
         smb2_get_uint32(vec, 60, &name_len);
-        if (name_len > 80 + name_len ||
-            80 + name_len > vec->len) {
+        if (name_len > vec->len || vec->len - name_len < 80) {
                 smb2_set_error(smb2, "Malformed name in query.\n");
                 return -1;
         }

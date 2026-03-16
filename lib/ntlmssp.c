@@ -1238,6 +1238,10 @@ ntlmssp_get_utf16_field(uint8_t *input_buf, int input_len, int offset, char **re
         field_len = le32toh(u32) >> 16;
         memcpy(&u32, &input_buf[offset + 4], 4);
         field_off = le32toh(u32);
+        if (field_off >= (uint32_t)input_len ||
+            field_len > ((uint32_t)input_len - field_off)) {
+                return;
+        }
         if (field_len && field_off) {
                 *result = (char*)smb2_utf16_to_utf8((uint16_t *)(void *)(input_buf + field_off), field_len / 2);
         }
@@ -1261,7 +1265,7 @@ ntlmssp_authenticate_blob(struct smb2_server *server, struct smb2_context *smb2,
         /* uint32_t negotiate_flags; */
         uint32_t u32;
 
-        if (!input_buf || (input_len < 8) || memcmp(input_buf, "NTLMSSP", 8)) {
+        if (!input_buf || (input_len < 64) || memcmp(input_buf, "NTLMSSP", 8)) {
                 return -1;
         }
         memcpy(&u32, &input_buf[4*2], 4);
@@ -1324,22 +1328,29 @@ ntlmssp_authenticate_blob(struct smb2_server *server, struct smb2_context *smb2,
         field_len = le32toh(u32) >> 16;
         memcpy(&u32, &input_buf[4*6], 4);
         field_off = le32toh(u32);
-        if (field_len == 0 || field_off == 0) {
+        if (field_len < 16 || field_off == 0) {
                 return -1;
         }
-        if (field_off > (uint32_t)input_len) {
+        if (field_off >= (uint32_t)input_len ||
+            field_len > ((uint32_t)input_len - field_off)) {
                 return -1;
         }
         /* 16 byte NTLMv2 response */
         response = input_buf + field_off;
         challenge_len = field_len - 16;
         if (challenge_len > 9*4) {
+                if (field_len < 40) {
+                        return -1;
+                }
                 temp = input_buf + field_off + 16;
                 temp_len = field_len - 16;
                 if (auth_data->client_challenge) {
                         free(auth_data->client_challenge);
                 }
                 auth_data->client_challenge = malloc(8);
+                if (!auth_data->client_challenge) {
+                        return -1;
+                }
                 memcpy(auth_data->client_challenge, input_buf + field_off + 32, 8);
         }
         else {

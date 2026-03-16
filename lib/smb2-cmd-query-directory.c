@@ -35,6 +35,8 @@
 #include <string.h>
 #endif
 
+#include <limits.h>
+
 #ifdef STDC_HEADERS
 #include <stddef.h>
 #endif
@@ -425,6 +427,8 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
         struct smb2_query_directory_reply *rep;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
+        uint32_t end_offset;
+        int variable_len;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_QUERY_DIRECTORY_REPLY_SIZE ||
@@ -445,10 +449,23 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
 
         smb2_get_uint16(iov, 2, &rep->output_buffer_offset);
         smb2_get_uint32(iov, 4, &rep->output_buffer_length);
+        end_offset = rep->output_buffer_offset + rep->output_buffer_length;
+        if (end_offset < rep->output_buffer_offset) {
+                smb2_set_error(smb2, "Output buffer offset/length wrapped");
+                free(rep);
+                return -1;
+        }
         if (rep->output_buffer_length &&
-            (rep->output_buffer_offset + rep->output_buffer_length > smb2->spl)) {
+            (end_offset > smb2->spl)) {
                 smb2_set_error(smb2, "Output buffer extends beyond end of "
                                "PDU");
+                free(rep);
+                return -1;
+        }
+        if (rep->output_buffer_length &&
+            smb2->hdr.next_command &&
+            (end_offset > smb2->hdr.next_command)) {
+                smb2_set_error(smb2, "Current PDU extends into next chained PDU");
                 free(rep);
                 return -1;
         }
@@ -458,9 +475,16 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
         }
 
         if (rep->output_buffer_offset < SMB2_HEADER_SIZE +
-            (SMB2_QUERY_INFO_REPLY_SIZE & 0xfffe)) {
+            (SMB2_QUERY_DIRECTORY_REPLY_SIZE & 0xfffe)) {
                 smb2_set_error(smb2, "Output buffer overlaps with "
                                "Query Dir reply header");
+                free(rep);
+                return -1;
+        }
+        variable_len = IOV_OFFSET_DIRECTORY;
+        if (variable_len < 0 ||
+            rep->output_buffer_length > (uint32_t)(INT_MAX - variable_len)) {
+                smb2_set_error(smb2, "Output buffer length overflow");
                 free(rep);
                 return -1;
         }
@@ -468,7 +492,7 @@ smb2_process_query_directory_fixed(struct smb2_context *smb2,
         /* Return the amount of data that the output buffer will take up.
          * Including any padding before the output buffer itself.
          */
-        return IOV_OFFSET_DIRECTORY + rep->output_buffer_length;
+        return variable_len + (int)rep->output_buffer_length;
 }
 
 int
@@ -477,8 +501,15 @@ smb2_process_query_directory_variable(struct smb2_context *smb2,
 {
         struct smb2_query_directory_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
+        int offset = IOV_OFFSET_DIRECTORY;
 
-        rep->output_buffer = &iov->buf[IOV_OFFSET_DIRECTORY];
+        if (offset < 0 || offset > (int)iov->len ||
+            rep->output_buffer_length > iov->len - (size_t)offset) {
+                smb2_set_error(smb2, "Malformed query-directory output buffer");
+                return -1;
+        }
+
+        rep->output_buffer = &iov->buf[offset];
 
         return 0;
 }
@@ -493,6 +524,8 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
         struct smb2_query_directory_request *req;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
+        uint32_t end_offset;
+        int variable_len;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_QUERY_DIRECTORY_REQUEST_SIZE ||
@@ -519,10 +552,23 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 26, &req->file_name_length);
         smb2_get_uint32(iov, 28, &req->output_buffer_length);
 
+        end_offset = req->file_name_offset + req->file_name_length;
+        if (end_offset < req->file_name_offset) {
+                smb2_set_error(smb2, "Filename offset/length wrapped");
+                free(req);
+                return -1;
+        }
         if (req->file_name_length &&
-            (req->file_name_offset + req->file_name_length > (uint16_t)smb2->spl)) {
+            (end_offset > smb2->spl)) {
                 smb2_set_error(smb2, "Filename extends beyond end of "
                                "PDU");
+                free(req);
+                return -1;
+        }
+        if (req->file_name_length &&
+            smb2->hdr.next_command &&
+            (end_offset > smb2->hdr.next_command)) {
+                smb2_set_error(smb2, "Current PDU extends into next chained PDU");
                 free(req);
                 return -1;
         }
@@ -538,11 +584,18 @@ smb2_process_query_directory_request_fixed(struct smb2_context *smb2,
                 free(req);
                 return -1;
         }
+        variable_len = IOVREQ_OFFSET_DIRECTORY;
+        if (variable_len < 0 ||
+            req->file_name_length > (uint32_t)(INT_MAX - variable_len)) {
+                smb2_set_error(smb2, "Filename length overflow");
+                free(req);
+                return -1;
+        }
 
         /* Return the amount of data that the name will take up.
          * Including any padding before the name itself.
          */
-        return IOVREQ_OFFSET_DIRECTORY + req->file_name_length;
+        return variable_len + (int)req->file_name_length;
 }
 
 int
@@ -553,9 +606,15 @@ smb2_process_query_directory_request_variable(struct smb2_context *smb2,
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         void *ptr;
         int name_byte_len;
+        int offset = IOVREQ_OFFSET_DIRECTORY;
 
         if (req->file_name_length > 0) {
-                req->name = smb2_utf16_to_utf8((uint16_t*)(void *)&iov->buf[IOVREQ_OFFSET_DIRECTORY], req->file_name_length / 2);
+                if (offset < 0 || offset > (int)iov->len ||
+                    req->file_name_length > iov->len - (size_t)offset) {
+                        smb2_set_error(smb2, "Malformed query-directory filename");
+                        return -1;
+                }
+                req->name = smb2_utf16_to_utf8((uint16_t*)(void *)&iov->buf[offset], req->file_name_length / 2);
                 if (req->name) {
                         name_byte_len = strlen(req->name) + 1;
                         ptr = smb2_alloc_init(smb2, name_byte_len);
@@ -576,4 +635,3 @@ smb2_process_query_directory_request_variable(struct smb2_context *smb2,
         }
         return 0;
 }
-

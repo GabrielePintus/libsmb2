@@ -300,14 +300,25 @@ decode_dirents(struct smb2_context *smb2, struct smb2dir *dir,
                                        "dirent_internal");
                         return -1;
                 }
-                SMB2_LIST_ADD(&dir->entries, ent);
-
 
                 tmp_vec.buf = &vec->buf[offset];
                 tmp_vec.len = vec->len - offset;
 
-                smb2_decode_fileidfulldirectoryinformation(smb2, &fs,
-                                                           &tmp_vec);
+                memset(&fs, 0, sizeof(fs));
+                if (smb2_decode_fileidfulldirectoryinformation(smb2, &fs,
+                                                               &tmp_vec) < 0) {
+                        free(ent);
+                        return -1;
+                }
+                if (fs.next_entry_offset &&
+                    (fs.next_entry_offset < 80 ||
+                     fs.next_entry_offset > tmp_vec.len)) {
+                        smb2_set_error(smb2, "Malformed query reply.");
+                        free(discard_const(fs.name));
+                        free(ent);
+                        return -1;
+                }
+                SMB2_LIST_ADD(&dir->entries, ent);
                 /* steal the name */
                 ent->dirent.name = fs.name;
                 ent->dirent.st.smb2_type = SMB2_TYPE_FILE;
@@ -930,10 +941,14 @@ negotiate_cb(struct smb2_context *smb2, int status,
                  * Opt in proactively so that PDU integrity verification
                  * in smb2_read_data() (socket.c) is not silently skipped. */
                 smb2->sign = 1;
-        } else {
+        } else if (!smb2->seal) {
                 smb2_set_error(smb2,
-                        "WARNING: server does not support SMB2 signing. "
-                        "PDU integrity cannot be verified.");
+                        "Server does not support SMB2 signing; refusing "
+                        "unsigned session setup.");
+                smb2_close_context(smb2);
+                c_data->cb(smb2, -EACCES, NULL, c_data->cb_data);
+                free_c_data(smb2, c_data);
+                return;
         }
 
         if (smb2->seal) {
@@ -4283,4 +4298,3 @@ int smb2_serve_port(struct smb2_server *server, const int max_connections, smb2_
 #endif
         return err;
 }
-

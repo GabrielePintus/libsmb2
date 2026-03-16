@@ -35,6 +35,8 @@
 #include <string.h>
 #endif
 
+#include <limits.h>
+
 #ifdef STDC_HEADERS
 #include <stddef.h>
 #endif
@@ -307,6 +309,8 @@ smb2_process_create_fixed(struct smb2_context *smb2,
         struct smb2_create_reply *rep;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
+        uint32_t end_offset;
+        int variable_len;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_CREATE_REPLY_SIZE ||
@@ -351,11 +355,38 @@ smb2_process_create_fixed(struct smb2_context *smb2,
                 free(rep);
                 return -1;
         }
+        end_offset = rep->create_context_offset + rep->create_context_length;
+        if (end_offset < rep->create_context_offset) {
+                smb2_set_error(smb2, "Create context offset/length wrapped");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+        if (end_offset > smb2->spl) {
+                smb2_set_error(smb2, "Create context extends beyond end of PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+        if (smb2->hdr.next_command && end_offset > smb2->hdr.next_command) {
+                smb2_set_error(smb2, "Current PDU extends into next chained PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+        variable_len = IOV_OFFSET_CREATE;
+        if (variable_len < 0 ||
+            rep->create_context_length > (uint32_t)(INT_MAX - variable_len)) {
+                smb2_set_error(smb2, "Create context length overflow");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
 
         /* Return the amount of data that the security buffer will take up.
          * Including any padding before the security buffer itself.
          */
-        return IOV_OFFSET_CREATE + rep->create_context_length;
+        return variable_len + (int)rep->create_context_length;
 }
 
 int
@@ -365,9 +396,15 @@ smb2_process_create_variable(struct smb2_context *smb2,
         struct smb2_create_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         struct smb2_iovec vec;
+        int offset = IOV_OFFSET_CREATE;
 
-        vec.buf = iov->buf + IOV_OFFSET_CREATE;
-        vec.len = iov->len - IOV_OFFSET_CREATE;
+        if (offset < 0 || offset > (int)iov->len ||
+            rep->create_context_length > iov->len - (size_t)offset) {
+                smb2_set_error(smb2, "Malformed create context offset/length");
+                return -1;
+        }
+        vec.buf = iov->buf + offset;
+        vec.len = iov->len - offset;
 
         rep->create_context = NULL;
         if (rep->create_context_length) {
@@ -505,4 +542,3 @@ smb2_process_create_request_variable(struct smb2_context *smb2,
         }
         return 0;
 }
-

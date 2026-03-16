@@ -83,6 +83,25 @@
  */
 static struct smb2_context *active_contexts;
 
+/* Best-effort wipe to reduce plaintext credential lifetime in heap memory. */
+static void
+smb2_secure_clear_free(char *secret)
+{
+        volatile unsigned char *p;
+        size_t len;
+
+        if (secret == NULL) {
+                return;
+        }
+
+        len = strlen(secret);
+        p = (volatile unsigned char *)secret;
+        while (len--) {
+                *p++ = 0;
+        }
+        free(secret);
+}
+
 static int
 smb2_parse_args(struct smb2_context *smb2, const char *args)
 {
@@ -366,7 +385,7 @@ void smb2_destroy_context(struct smb2_context *smb2)
         free(discard_const(smb2->user));
         free(discard_const(smb2->server));
         free(discard_const(smb2->share));
-        free(discard_const(smb2->password));
+        smb2_secure_clear_free(discard_const(smb2->password));
         free(discard_const(smb2->domain));
         free(discard_const(smb2->workstation));
         free(smb2->enc);
@@ -655,7 +674,7 @@ const char *smb2_get_workstation(struct smb2_context *smb2)
 void smb2_set_password(struct smb2_context *smb2, const char *password)
 {
         if (smb2->password) {
-                free(discard_const(smb2->password));
+                smb2_secure_clear_free(discard_const(smb2->password));
                 smb2->password = NULL;
         }
         if (password == NULL) {
@@ -775,4 +794,3 @@ int smb2_delegate_credentials(struct smb2_context *in, struct smb2_context *out)
         return -1;
 }
 #endif
-

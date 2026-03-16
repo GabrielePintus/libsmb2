@@ -1479,6 +1479,10 @@ dce_unfragment_ioctl(struct dcerpc_context *dce,  struct dcerpc_pdu *pdu,
                 return;
         }
 
+        if (hdr.frag_length < 24 || hdr.frag_length > iov->len) {
+                return;
+        }
+
         offset += hdr.frag_length;
         unfragment_len = hdr.frag_length;
         do {
@@ -1495,12 +1499,20 @@ dce_unfragment_ioctl(struct dcerpc_context *dce,  struct dcerpc_pdu *pdu,
                 if (dcerpc_header_coder(dce, pdu, &tmpiov, &o, &next_hdr)) {
                         return;
                 }
+                if (next_hdr.frag_length < 24 ||
+                    next_hdr.frag_length > tmpiov.len) {
+                        return;
+                }
 
                 memmove(iov->buf + unfragment_len, iov->buf + offset + 24,
                         next_hdr.frag_length - 24);
                 unfragment_len += next_hdr.frag_length - 24;
                 offset += next_hdr.frag_length;
 
+                if ((uint32_t)hdr.frag_length + (uint32_t)next_hdr.frag_length >
+                    0xffffU) {
+                        return;
+                }
                 hdr.frag_length += next_hdr.frag_length;
                 if (next_hdr.pfc_flags & PFC_LAST_FRAG) {
                         hdr.pfc_flags |= PFC_LAST_FRAG;

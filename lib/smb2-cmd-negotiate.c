@@ -213,7 +213,7 @@ smb2_encode_negotiate_reply(struct smb2_context *smb2,
                               struct smb2_negotiate_reply *rep)
 {
         uint8_t *buf;
-        int len, seclen;
+        int len, seclen = 0;
         struct smb2_iovec *iov;
 
         len = SMB2_NEGOTIATE_REPLY_SIZE & 0xfffe;
@@ -239,8 +239,7 @@ smb2_encode_negotiate_reply(struct smb2_context *smb2,
         }
 
         if (rep->security_buffer_length) {
-                seclen = rep->security_buffer_length;
-                seclen = PAD_TO_64BIT(len);
+                seclen = PAD_TO_64BIT(rep->security_buffer_length);
                 /* Security buffer */
                 buf = malloc(seclen);
                 if (buf == NULL) {
@@ -379,6 +378,7 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
         struct smb2_negotiate_reply *rep;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
+        uint32_t sec_end;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_NEGOTIATE_REPLY_SIZE ||
@@ -410,10 +410,24 @@ smb2_process_negotiate_fixed(struct smb2_context *smb2,
         smb2_get_uint16(iov, 56, &rep->security_buffer_offset);
         smb2_get_uint16(iov, 58, &rep->security_buffer_length);
 
+        sec_end = rep->security_buffer_offset + rep->security_buffer_length;
+        if (sec_end < rep->security_buffer_offset) {
+                smb2_set_error(smb2, "Security buffer offset/length wrapped");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
         if (rep->security_buffer_length &&
-            (rep->security_buffer_offset + rep->security_buffer_length > (uint16_t)smb2->spl)) {
+            sec_end > smb2->spl) {
                 smb2_set_error(smb2, "Security buffer extends beyond end of "
                                "PDU");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
+        if (rep->security_buffer_length &&
+            smb2->hdr.next_command && sec_end > smb2->hdr.next_command) {
+                smb2_set_error(smb2, "Current PDU extends into next chained PDU");
                 pdu->payload = NULL;
                 free(rep);
                 return -1;
@@ -643,4 +657,3 @@ smb2_process_negotiate_request_variable(struct smb2_context *smb2,
 
         return 0;
 }
-

@@ -35,6 +35,8 @@
 #include <string.h>
 #endif
 
+#include <limits.h>
+
 #ifdef STDC_HEADERS
 #include <stddef.h>
 #endif
@@ -370,6 +372,7 @@ smb2_process_query_info_fixed(struct smb2_context *smb2,
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
         uint32_t opl;
+        int variable_len;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_QUERY_INFO_REPLY_SIZE ||
@@ -427,11 +430,19 @@ smb2_process_query_info_fixed(struct smb2_context *smb2,
                 free(rep);
                 return -1;
         }
+        variable_len = IOV_OFFSET_QUERY;
+        if (variable_len < 0 ||
+            rep->output_buffer_length > (uint32_t)(INT_MAX - variable_len)) {
+                smb2_set_error(smb2, "Output buffer length overflow");
+                pdu->payload = NULL;
+                free(rep);
+                return -1;
+        }
 
         /* Return the amount of data that the output buffer will take up.
          * Including any padding before the output buffer itself.
          */
-        return IOV_OFFSET_QUERY + rep->output_buffer_length;
+        return variable_len + (int)rep->output_buffer_length;
 }
 
 int smb2_process_query_info_variable(struct smb2_context *smb2,
@@ -439,10 +450,19 @@ int smb2_process_query_info_variable(struct smb2_context *smb2,
 {
         struct smb2_query_info_reply *rep = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
-        struct smb2_iovec vec = {&iov->buf[IOV_OFFSET_QUERY],
-                                 iov->len - IOV_OFFSET_QUERY,
+        int offset = IOV_OFFSET_QUERY;
+        struct smb2_iovec vec = {NULL,
+                                 0,
                                  NULL};
         void *ptr = NULL;
+
+        if (offset < 0 || offset > (int)iov->len ||
+            rep->output_buffer_length > iov->len - (size_t)offset) {
+                smb2_set_error(smb2, "Malformed query-info output buffer");
+                return -1;
+        }
+        vec.buf = &iov->buf[offset];
+        vec.len = iov->len - offset;
 
         switch (pdu->info_type) {
         case SMB2_0_INFO_FILE:
@@ -695,6 +715,8 @@ smb2_process_query_info_request_fixed(struct smb2_context *smb2,
         struct smb2_query_info_request *req;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
         uint16_t struct_size;
+        uint32_t end_offset;
+        int variable_len;
 
         smb2_get_uint16(iov, 0, &struct_size);
         if (struct_size != SMB2_QUERY_INFO_REQUEST_SIZE ||
@@ -734,8 +756,35 @@ smb2_process_query_info_request_fixed(struct smb2_context *smb2,
                 free(req);
                 return -1;
         }
+        end_offset = req->input_buffer_offset + req->input_buffer_length;
+        if (end_offset < req->input_buffer_offset) {
+                smb2_set_error(smb2, "Input buffer offset/length wrapped");
+                pdu->payload = NULL;
+                free(req);
+                return -1;
+        }
+        if (end_offset > smb2->spl) {
+                smb2_set_error(smb2, "Input buffer extends beyond end of PDU");
+                pdu->payload = NULL;
+                free(req);
+                return -1;
+        }
+        if (smb2->hdr.next_command && end_offset > smb2->hdr.next_command) {
+                smb2_set_error(smb2, "Current PDU extends into next chained PDU");
+                pdu->payload = NULL;
+                free(req);
+                return -1;
+        }
+        variable_len = IOVREQ_OFFSET_QUERY;
+        if (variable_len < 0 ||
+            req->input_buffer_length > (uint32_t)(INT_MAX - variable_len)) {
+                smb2_set_error(smb2, "Input buffer length overflow");
+                pdu->payload = NULL;
+                free(req);
+                return -1;
+        }
 
-        return IOVREQ_OFFSET_QUERY + req->input_buffer_length;
+        return variable_len + (int)req->input_buffer_length;
 }
 
 int
@@ -744,10 +793,17 @@ smb2_process_query_info_request_variable(struct smb2_context *smb2,
 {
         struct smb2_query_info_request *req = pdu->payload;
         struct smb2_iovec *iov = &smb2->in.iov[smb2->in.niov - 1];
-        struct smb2_iovec vec = {&iov->buf[IOVREQ_OFFSET_QUERY],
-                                 iov->len - IOVREQ_OFFSET_QUERY,
+        int offset = IOVREQ_OFFSET_QUERY;
+        struct smb2_iovec vec = {NULL,
+                                 0,
                                  NULL};
+        if (offset < 0 || offset > (int)iov->len ||
+            req->input_buffer_length > iov->len - (size_t)offset) {
+                smb2_set_error(smb2, "Malformed query-info input buffer");
+                return -1;
+        }
+        vec.buf = &iov->buf[offset];
+        vec.len = iov->len - offset;
         req->input = (uint8_t *)vec.buf;
         return 0;
 }
-

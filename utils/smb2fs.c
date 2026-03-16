@@ -6,6 +6,7 @@
  *   gcc -o smb2fs smb2fs.c \
  *       -I/usr/local/include/osxfuse -I/usr/local/include \
  *       -L/usr/local/lib -lsmb2 -losxfuse \
+ *       -O2 \
  *       -D_FILE_OFFSET_BITS=64
  */
 
@@ -225,6 +226,138 @@ static void scrub_password_argv(struct fuse_args *args)
             p = strstr(p, "password=");
         }
     }
+}
+
+static int smb2fs_is_smb_option_token(const char *opt)
+{
+    if (!opt) {
+        return 0;
+    }
+    return (strncmp(opt, "server=", 7) == 0) ||
+           (strncmp(opt, "share=", 6) == 0) ||
+           (strncmp(opt, "user=", 5) == 0) ||
+           (strncmp(opt, "password=", 9) == 0) ||
+           (strncmp(opt, "domain=", 7) == 0) ||
+           (strncmp(opt, "passfd=", 7) == 0) ||
+           (strcmp(opt, "password_prompt") == 0);
+}
+
+/* Remove smb2fs-specific tokens from a comma-separated -o option list. */
+static char *smb2fs_filter_mount_optlist(const char *optlist)
+{
+    char *in;
+    char *out;
+    char *tok;
+    char *next;
+    size_t out_len = 0;
+    size_t max_len;
+    int first = 1;
+
+    if (!optlist) {
+        return NULL;
+    }
+
+    max_len = strlen(optlist) + 1;
+    in = strdup(optlist);
+    out = malloc(max_len);
+    if (!in || !out) {
+        free(in);
+        free(out);
+        return NULL;
+    }
+    out[0] = '\0';
+
+    tok = in;
+    while (tok && *tok) {
+        next = strchr(tok, ',');
+        if (next) {
+            *next = '\0';
+            next++;
+        }
+
+        if (*tok != '\0' && !smb2fs_is_smb_option_token(tok)) {
+            size_t tok_len = strlen(tok);
+            if (!first) {
+                out[out_len++] = ',';
+            }
+            memcpy(out + out_len, tok, tok_len);
+            out_len += tok_len;
+            out[out_len] = '\0';
+            first = 0;
+        }
+        tok = next;
+    }
+
+    free(in);
+    if (out_len == 0) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+static int smb2fs_prepare_mount_args(struct fuse_args *src, struct fuse_args *dst)
+{
+    int i;
+
+    if (!src || !dst || src->argc < 1 || !src->argv || !src->argv[0]) {
+        return -1;
+    }
+
+    if (fuse_opt_add_arg(dst, src->argv[0]) < 0) {
+        return -1;
+    }
+
+    for (i = 1; i < src->argc; i++) {
+        const char *arg = src->argv[i];
+
+        if (!arg) {
+            continue;
+        }
+
+        if (strcmp(arg, "-o") == 0 && (i + 1) < src->argc) {
+            char *filtered = smb2fs_filter_mount_optlist(src->argv[i + 1]);
+            if (filtered) {
+                if (fuse_opt_add_arg(dst, "-o") < 0 ||
+                    fuse_opt_add_arg(dst, filtered) < 0) {
+                    free(filtered);
+                    return -1;
+                }
+                free(filtered);
+            }
+            i++;
+            continue;
+        }
+
+        if (arg[0] == '-' && arg[1] == 'o' && arg[2] != '\0') {
+            char *filtered = smb2fs_filter_mount_optlist(arg + 2);
+            if (filtered) {
+                if (fuse_opt_add_arg(dst, "-o") < 0 ||
+                    fuse_opt_add_arg(dst, filtered) < 0) {
+                    free(filtered);
+                    return -1;
+                }
+                free(filtered);
+            }
+            continue;
+        }
+
+        if (smb2fs_is_smb_option_token(arg)) {
+            continue;
+        }
+
+        if (fuse_opt_add_arg(dst, arg) < 0) {
+            return -1;
+        }
+    }
+
+    /* -s = single-threaded (libsmb2 is not thread-safe) */
+    if (fuse_opt_add_arg(dst, "-s") < 0 ||
+        fuse_opt_add_arg(dst, "-o") < 0 ||
+        fuse_opt_add_arg(dst, "defer_permissions") < 0) {
+        return -1;
+    }
+    return 0;
 }
 
 #define SMB2FS_OPT(t, p) { t, offsetof(struct smb2fs_config, p), 1 }
@@ -999,7 +1132,9 @@ static struct fuse_operations smb2fs_ops = {
 
 int main(int argc, char *argv[])
 {
+    struct fuse_args raw_args = FUSE_ARGS_INIT(argc, argv);
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+    struct fuse_args mount_args = FUSE_ARGS_INIT(0, NULL);
     int ret = 1;
     int pw_sources = 0;
     char *runtime_password = NULL;
@@ -1010,6 +1145,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     scrub_password_argv(&args);
+    scrub_password_argv(&raw_args);
 
     if (!cfg.server || !cfg.share || !cfg.user) {
         fprintf(stderr,
@@ -1083,10 +1219,7 @@ int main(int argc, char *argv[])
 
     fflush(stderr);
 
-    /* -s = single-threaded (libsmb2 is not thread-safe) */
-    if (fuse_opt_add_arg(&args, "-s") < 0 ||
-        fuse_opt_add_arg(&args, "-o") < 0 ||
-        fuse_opt_add_arg(&args, "defer_permissions") < 0) {
+    if (smb2fs_prepare_mount_args(&raw_args, &mount_args) < 0) {
         fprintf(stderr, "Failed to prepare FUSE arguments\n");
         smb2_disconnect_share(smb2_ctx);
         smb2_destroy_context(smb2_ctx);
@@ -1094,7 +1227,7 @@ int main(int argc, char *argv[])
         goto out;
     }
 
-    ret = fuse_main(args.argc, args.argv, &smb2fs_ops, NULL);
+    ret = fuse_main(mount_args.argc, mount_args.argv, &smb2fs_ops, NULL);
 
     /* Cleanup */
     if (dce_ctx) {
@@ -1111,6 +1244,7 @@ int main(int argc, char *argv[])
     smb2_ctx = NULL;
 
 out:
+    fuse_opt_free_args(&mount_args);
     fuse_opt_free_args(&args);
     smb2fs_free_config();
     return ret;

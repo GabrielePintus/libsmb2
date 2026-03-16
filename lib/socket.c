@@ -392,7 +392,8 @@ read_more_data:
                         return -EAGAIN;
                 }
                 smb2_set_error(smb2, "Read from socket failed, "
-                               "errno:%d. Closing socket.", err);
+                               "fd:%d errno:%d. Closing socket.",
+                               (int)smb2->fd, err);
                 return -1;
         }
         if (count == 0) {
@@ -900,6 +901,16 @@ read_more_data:
                         smb2_free_pdu(smb2, pdu);
                 }
                 smb2->pdu = NULL;
+        }
+
+        /*
+         * Some callbacks (e.g. connect/session error paths) close the socket.
+         * Stop processing immediately so we don't continue into chained reads
+         * on an invalidated descriptor.
+         */
+        if (!SMB2_VALID_SOCKET(smb2->fd) && smb2->connecting_fds_count == 0) {
+                smb2->in.num_done = 0;
+                return 0;
         }
 
         if (is_chained) {

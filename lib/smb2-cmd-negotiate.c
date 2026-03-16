@@ -330,6 +330,23 @@ smb2_parse_encryption_context(struct smb2_context *smb2,
 }
 
 static int
+smb2_negotiate_context_header_valid(struct smb2_iovec *iov, int offset, int remain)
+{
+        uint16_t next_len;
+
+        if (offset < 0 || remain < 8) {
+                return 0;
+        }
+        if (smb2_get_uint16(iov, offset + 2, &next_len) < 0) {
+                return 0;
+        }
+        if ((int)next_len + 8 > remain) {
+                return 0;
+        }
+        return 1;
+}
+
+static int
 smb2_parse_negotiate_contexts(struct smb2_context *smb2,
                               struct smb2_negotiate_reply *rep,
                               struct smb2_iovec *iov,
@@ -337,7 +354,12 @@ smb2_parse_negotiate_contexts(struct smb2_context *smb2,
 {
         uint16_t type, len;
         int remain;
+        int min_advance;
         int advance;
+        int compact_valid;
+        int padded_valid;
+        int has_nonzero_pad;
+        int i;
 
         while (count--) {
                 remain = (int)iov->len - offset;
@@ -350,14 +372,45 @@ smb2_parse_negotiate_contexts(struct smb2_context *smb2,
                         smb2_set_error(smb2, "Failed to decode negotiate context");
                         return -1;
                 }
-                if ((int)len > remain - 8) {
+                min_advance = (int)len + 8;
+                if (min_advance > remain) {
                         smb2_set_error(smb2, "Negotiate context length exceeds buffer");
                         return -1;
                 }
-                advance = PAD_TO_64BIT((int)len + 8);
-                if (advance > remain) {
-                        smb2_set_error(smb2, "Bad padded len in negotiate context");
-                        return -1;
+
+                advance = PAD_TO_64BIT(min_advance);
+                if (count > 0 && advance != min_advance) {
+                        padded_valid = 0;
+                        if (advance <= remain) {
+                                padded_valid = smb2_negotiate_context_header_valid(iov,
+                                                     offset + advance,
+                                                     remain - advance);
+                                if (padded_valid) {
+                                        has_nonzero_pad = 0;
+                                        for (i = min_advance; i < advance; i++) {
+                                                if (iov->buf[offset + i] != 0) {
+                                                        has_nonzero_pad = 1;
+                                                        break;
+                                                }
+                                        }
+                                        if (has_nonzero_pad) {
+                                                padded_valid = 0;
+                                        }
+                                }
+                        }
+
+                        compact_valid = smb2_negotiate_context_header_valid(iov,
+                                                        offset + min_advance,
+                                                        remain - min_advance);
+                        if (!padded_valid && compact_valid) {
+                                advance = min_advance;
+                        } else if (!padded_valid && !compact_valid) {
+                                smb2_set_error(smb2, "Bad len in negotiate context");
+                                return -1;
+                        }
+                } else if (advance > remain) {
+                        /* Tolerate missing trailing padding in the last context. */
+                        advance = min_advance;
                 }
 
                 switch (type) {

@@ -1,6 +1,6 @@
 /* smb2fs.c - FUSE filesystem for SMB2 shares using libsmb2
  *
- * Usage: smb2fs <mountpoint> -o server=HOST,share=SHARE,user=USER[,password=PASS][,domain=DOMAIN]
+ * Usage: smb2fs <mountpoint> -o server=HOST,share=SHARE,user=USER[,password=PASS|passfd=FD|password_prompt][,domain=DOMAIN]
  *
  * Build on macOS with OSXFUSE:
  *   gcc -o smb2fs smb2fs.c \
@@ -78,9 +78,11 @@ struct smb2fs_config {
     char *user;
     char *password;
     char *domain;
+    int   passfd;
+    int   password_prompt;
 };
 
-static struct smb2fs_config cfg = { NULL, NULL, NULL, NULL, NULL };
+static struct smb2fs_config cfg = { NULL, NULL, NULL, NULL, NULL, -1, 0 };
 
 static void smb2fs_free_config(void)
 {
@@ -97,6 +99,108 @@ static void smb2fs_free_config(void)
     }
     free(cfg.domain);
     cfg.domain = NULL;
+    cfg.passfd = -1;
+    cfg.password_prompt = 0;
+}
+
+static int smb2fs_password_from_fd(int fd, char **password_out)
+{
+    char chunk[256];
+    char *buf = NULL;
+    char *tmp;
+    size_t len = 0;
+    size_t cap = 0;
+    size_t newcap;
+    ssize_t nread;
+
+    if (!password_out || fd < 0) {
+        return -1;
+    }
+
+    while ((nread = read(fd, chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)nread > 65536) {
+            secure_zero(chunk, sizeof(chunk));
+            free(buf);
+            return -1;
+        }
+        if (len + (size_t)nread + 1 > cap) {
+            newcap = cap ? cap : 256;
+            while (newcap < len + (size_t)nread + 1) {
+                newcap *= 2;
+            }
+            tmp = realloc(buf, newcap);
+            if (!tmp) {
+                if (buf) {
+                    secure_zero(buf, len);
+                    free(buf);
+                }
+                secure_zero(chunk, sizeof(chunk));
+                return -1;
+            }
+            buf = tmp;
+            cap = newcap;
+        }
+        memcpy(buf + len, chunk, (size_t)nread);
+        len += (size_t)nread;
+    }
+
+    secure_zero(chunk, sizeof(chunk));
+
+    if (nread < 0) {
+        if (buf) {
+            secure_zero(buf, len);
+            free(buf);
+        }
+        return -1;
+    }
+
+    if (!buf) {
+        buf = calloc(1, 1);
+        if (!buf) {
+            return -1;
+        }
+    } else {
+        buf[len] = '\0';
+    }
+
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) {
+        buf[--len] = '\0';
+    }
+
+    *password_out = buf;
+    return 0;
+}
+
+static int smb2fs_password_from_prompt(char **password_out)
+{
+    char *pw;
+    char *copy;
+    size_t len;
+
+    if (!password_out) {
+        return -1;
+    }
+
+    pw = getpass("SMB password: ");
+    if (!pw) {
+        return -1;
+    }
+
+    len = strlen(pw);
+    copy = malloc(len + 1);
+    if (!copy) {
+        if (len) {
+            secure_zero(pw, len);
+        }
+        return -1;
+    }
+
+    memcpy(copy, pw, len + 1);
+    if (len) {
+        secure_zero(pw, len);
+    }
+    *password_out = copy;
+    return 0;
 }
 
 /* Overwrite password=... segments in argv to reduce command-line exposure. */
@@ -130,6 +234,8 @@ static struct fuse_opt smb2fs_opts[] = {
     SMB2FS_OPT("share=%s",    share),
     SMB2FS_OPT("user=%s",     user),
     SMB2FS_OPT("password=%s", password),
+    SMB2FS_OPT("passfd=%d",   passfd),
+    SMB2FS_OPT("password_prompt", password_prompt),
     SMB2FS_OPT("domain=%s",   domain),
     FUSE_OPT_END
 };
@@ -895,6 +1001,8 @@ int main(int argc, char *argv[])
 {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     int ret = 1;
+    int pw_sources = 0;
+    char *runtime_password = NULL;
 
     if (fuse_opt_parse(&args, &cfg, smb2fs_opts, NULL) < 0) {
         fuse_opt_free_args(&args);
@@ -906,9 +1014,39 @@ int main(int argc, char *argv[])
     if (!cfg.server || !cfg.share || !cfg.user) {
         fprintf(stderr,
             "Usage: %s <mountpoint> -o server=HOST,share=SHARE,"
-            "user=USER[,password=PASS][,domain=DOMAIN]\n",
+            "user=USER[,password=PASS|passfd=FD|password_prompt][,domain=DOMAIN]\n",
             argv[0]);
         goto out;
+    }
+
+    if (cfg.password) {
+        pw_sources++;
+    }
+    if (cfg.passfd >= 0) {
+        pw_sources++;
+    }
+    if (cfg.password_prompt) {
+        pw_sources++;
+    }
+    if (pw_sources > 1) {
+        fprintf(stderr,
+                "Choose only one password source: password=, passfd=, or "
+                "password_prompt\n");
+        goto out;
+    }
+    if (cfg.passfd >= 0) {
+        if (smb2fs_password_from_fd(cfg.passfd, &runtime_password) != 0) {
+            fprintf(stderr, "Failed to read password from passfd=%d\n",
+                    cfg.passfd);
+            goto out;
+        }
+        cfg.password = runtime_password;
+    } else if (cfg.password_prompt) {
+        if (smb2fs_password_from_prompt(&runtime_password) != 0) {
+            fprintf(stderr, "Failed to read password from prompt\n");
+            goto out;
+        }
+        cfg.password = runtime_password;
     }
 
     /* Connect main share */

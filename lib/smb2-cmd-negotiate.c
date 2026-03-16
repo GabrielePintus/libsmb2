@@ -336,19 +336,39 @@ smb2_parse_negotiate_contexts(struct smb2_context *smb2,
                               int offset, int count)
 {
         uint16_t type, len;
+        int remain;
+        int advance;
 
         while (count--) {
-                if (offset > (int)iov->len) {
-                        smb2_set_error(smb2, "Bad len in negotiate context\n");
+                remain = (int)iov->len - offset;
+                if (offset < 0 || remain < 8) {
+                        smb2_set_error(smb2, "Bad len in negotiate context");
                         return -1;
                 }
-                smb2_get_uint16(iov, offset, &type);
-                smb2_get_uint16(iov, offset + 2, &len);
+                if (smb2_get_uint16(iov, offset, &type) < 0 ||
+                    smb2_get_uint16(iov, offset + 2, &len) < 0) {
+                        smb2_set_error(smb2, "Failed to decode negotiate context");
+                        return -1;
+                }
+                if ((int)len > remain - 8) {
+                        smb2_set_error(smb2, "Negotiate context length exceeds buffer");
+                        return -1;
+                }
+                advance = PAD_TO_64BIT((int)len + 8);
+                if (advance > remain) {
+                        smb2_set_error(smb2, "Bad padded len in negotiate context");
+                        return -1;
+                }
 
                 switch (type) {
                 case SMB2_PREAUTH_INTEGRITY_CAP:
                         break;
                 case SMB2_ENCRYPTION_CAP:
+                        if (len < 2) {
+                                smb2_set_error(smb2,
+                                               "Malformed SMB2_ENCRYPTION_CAP");
+                                return -1;
+                        }
                         if (smb2_parse_encryption_context(smb2, rep,
                                                           iov, offset + 8)) {
                                 return -1;
@@ -365,7 +385,7 @@ smb2_parse_negotiate_contexts(struct smb2_context *smb2,
                                        "type 0x%04x", type);
                         return -1;
                 }
-                offset += PAD_TO_64BIT(len + 8);
+                offset += advance;
         }
 
         return 0;

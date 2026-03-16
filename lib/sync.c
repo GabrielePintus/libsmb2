@@ -74,13 +74,18 @@ static int wait_for_reply(struct smb2_context *smb2,
 		pfd.events = smb2_which_events(smb2);
 
 		if (poll(&pfd, 1, 1000) < 0) {
+                        if (errno == EINTR) {
+                                continue;
+                        }
 			smb2_set_error(smb2, "Poll failed");
 			return -1;
 		}
                 if (smb2->timeout) {
                         smb2_timeout_pdus(smb2);
                 }
-		if (!SMB2_VALID_SOCKET(smb2->fd) && ((time(NULL) - t) > (smb2->timeout)))
+		if (smb2->timeout > 0 &&
+                    !SMB2_VALID_SOCKET(smb2->fd) &&
+                    ((time(NULL) - t) > (smb2->timeout)))
 		{
 			smb2_set_error(smb2, "Timeout expired and no connection exists\n");
 			return -1;

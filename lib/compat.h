@@ -344,7 +344,16 @@ int getlogin_r(char *buf, size_t size);
 #undef getaddrinfo
 #undef freeaddrinfo
 #endif
-#define strncpy(a,b,c) strcpy(a,b)
+/* Amiga libnix lacks strncpy; provide a safe implementation that respects
+ * the size limit instead of silently delegating to unbounded strcpy. */
+static inline char *smb2_amiga_strncpy(char *dst, const char *src, size_t n)
+{
+        size_t i = 0;
+        while (i < n && src[i]) { dst[i] = src[i]; i++; }
+        while (i < n) dst[i++] = '\0';
+        return dst;
+}
+#define strncpy smb2_amiga_strncpy
 
 #define POLLIN      0x0001    /* There is data to read */
 #define POLLPRI     0x0002    /* There is urgent data to read */
@@ -473,7 +482,18 @@ int getlogin_r(char *buf, size_t size);
 #ifdef _IOP
 int getpid();
 #define close(x) lwip_close(x)
-#define snprintf(format, n, ...) sprintf(format, __VA_ARGS__)
+#include <stdarg.h>
+/* PS2 IOP libc lacks snprintf; provide a bounds-checking wrapper via vsnprintf. */
+static inline int smb2_iop_snprintf(char *buf, size_t n, const char *fmt, ...)
+{
+        int ret;
+        va_list ap;
+        va_start(ap, fmt);
+        ret = vsnprintf(buf, n, fmt, ap);
+        va_end(ap);
+        return ret;
+}
+#define snprintf smb2_iop_snprintf
 #define fcntl(a,b,c) lwip_fcntl(a,b,c)
 #endif
 

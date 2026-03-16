@@ -70,13 +70,16 @@ smb2_decode_file_fs_volume_info(struct smb2_context *smb2,
         smb2_get_uint8(vec,  17, &fs->reserved);
         name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[18],
                             fs->volume_label_length / 2);
-        fs->volume_label = smb2_alloc_data(smb2, memctx, strlen(name) + 1);
-        if (fs->volume_label == NULL) {
+        {
+                size_t label_len = strlen(name);
+                fs->volume_label = smb2_alloc_data(smb2, memctx, label_len + 1);
+                if (fs->volume_label == NULL) {
+                        free(discard_const(name));
+                        return -1;
+                }
+                memcpy(discard_const(fs->volume_label), name, label_len + 1);
                 free(discard_const(name));
-                return -1;
         }
-        strcpy(discard_const(fs->volume_label), name);
-        free(discard_const(name));
 
 	return 0;
 }
@@ -187,18 +190,26 @@ smb2_decode_file_fs_attribute_info(struct smb2_context *smb2,
         smb2_get_uint32(vec, 8, &name_len);
 
         if (name_len > 0) {
+                /* vec->len >= 20 is guaranteed above; guard against overflow
+                 * and out-of-bounds read when name_len exceeds available data. */
+                if (name_len > vec->len - 12) {
+                        name_len = (uint32_t)(vec->len - 12);
+                }
                 name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[12], name_len / 2);
                 if (!name) {
 
                         return -1;
                 }
-                fs->filesystem_name = smb2_alloc_data(smb2, memctx, strlen(name) + 1);
-                if (fs->filesystem_name == NULL) {
+                {
+                        size_t fsname_len = strlen(name);
+                        fs->filesystem_name = smb2_alloc_data(smb2, memctx, fsname_len + 1);
+                        if (fs->filesystem_name == NULL) {
+                                free(discard_const(name));
+                                return -1;
+                        }
+                        memcpy(discard_const(fs->filesystem_name), name, fsname_len + 1);
                         free(discard_const(name));
-                        return -1;
                 }
-                strcpy(discard_const(fs->filesystem_name), name);
-                free(discard_const(name));
         }
         return 0;
 }

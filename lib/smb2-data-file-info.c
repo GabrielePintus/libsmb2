@@ -166,9 +166,11 @@ smb2_decode_file_stream_info(struct smb2_context *smb2,
                 smb2_get_uint64(vec, offset + 16, &fs->stream_allocation_size);
 
                 if (fs->stream_name_length > 0) {
-                        name_len = fs->stream_name_length;
-                        if (vec->len < (offset + 24 + name_len)) {
-                                name_len = (int)vec->len - (int)offset - 24;
+                        name_len = (int)fs->stream_name_length;
+                        if (name_len < 0 || (size_t)offset + 24 > vec->len) {
+                                name_len = 0;
+                        } else if ((size_t)name_len > vec->len - (size_t)offset - 24) {
+                                name_len = (int)(vec->len - (size_t)offset - 24);
                         }
                         if (name_len > 0) {
                                 name = smb2_utf16_to_utf8(
@@ -183,7 +185,7 @@ smb2_decode_file_stream_info(struct smb2_context *smb2,
                                         free(discard_const(name));
                                         return -1;
                                 }
-                                strcpy(discard_const(fs->stream_name), name);
+                                memcpy(discard_const(fs->stream_name), name, fs->stream_name_length + 1);
                                 free(discard_const(name));
                         } else {
                                 fs->stream_name = NULL;
@@ -314,6 +316,13 @@ smb2_decode_file_all_info(struct smb2_context *smb2,
         smb2_get_uint32(vec, 96, &name_len);
 
         if (name_len > 0) {
+                if (vec->len < 100) {
+                        name_len = 0;
+                } else if (name_len > vec->len - 100) {
+                        name_len = (uint32_t)(vec->len - 100);
+                }
+        }
+        if (name_len > 0) {
                 name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[100], name_len / 2);
                 if (!name) {
                         return -1;
@@ -323,7 +332,10 @@ smb2_decode_file_all_info(struct smb2_context *smb2,
                         free(discard_const(name));
                         return -1;
                 }
-                strcpy(discard_const(fs->name), name);
+                {
+                        size_t name_copy_len = strlen(name);
+                        memcpy(discard_const(fs->name), name, name_copy_len + 1);
+                }
                 free(discard_const(name));
         } else {
                 fs->name = NULL;
@@ -461,9 +473,12 @@ smb2_decode_file_normalized_name_info(struct smb2_context *smb2,
 
         if (fs->file_name_length > 0) {
                 name_len = fs->file_name_length;
-                if (vec->len < (name_len + 4)) {
+                /* vec->len >= 4 is guaranteed by the check above.
+                 * Use subtraction-first form to avoid overflow when name_len
+                 * is close to UINT32_MAX. */
+                if (name_len > vec->len - 4) {
                         /* name can be truncated if client supplied small buffer */
-                        name_len = vec->len - 4;
+                        name_len = (uint32_t)(vec->len - 4);
                 }
                 if (name_len > 0) {
                         name = smb2_utf16_to_utf8((uint16_t *)(void *)&vec->buf[4], name_len / 2);
@@ -476,7 +491,7 @@ smb2_decode_file_normalized_name_info(struct smb2_context *smb2,
                                 free(discard_const(name));
                                 return -1;
                         }
-                        strcpy(discard_const(fs->name), name);
+                        memcpy(discard_const(fs->name), name, name_len + 1);
                         free(discard_const(name));
                 } else {
                         fs->name = NULL;

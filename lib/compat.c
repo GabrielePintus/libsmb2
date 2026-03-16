@@ -146,12 +146,26 @@ int asprintf(char **strp, const char *fmt, ...)
 {
         int len;
         char *str;
-        va_list args;        
+        va_list args;
 
+        /* Two-pass: measure the required length first, then allocate exactly. */
         va_start(args, fmt);
-        str = malloc(256);
-        len = sprintf(str, fmt, args);
+        len = vsnprintf(NULL, 0, fmt, args);
         va_end(args);
+
+        if (len < 0) {
+                *strp = NULL;
+                return -1;
+        }
+        str = malloc((size_t)len + 1);
+        if (str == NULL) {
+                *strp = NULL;
+                return -1;
+        }
+        va_start(args, fmt);
+        vsnprintf(str, (size_t)len + 1, fmt, args);
+        va_end(args);
+
         *strp = str;
         return len;
 }

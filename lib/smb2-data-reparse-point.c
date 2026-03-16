@@ -87,14 +87,17 @@ smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
 
                 tmp = smb2_utf16_to_utf8((uint16_t *)(void *)(&vec->buf[suboffset + 20]),
                                    sublen / 2);
-                rp->symlink.subname = smb2_alloc_data(smb2, rp,
-                                                      strlen(tmp) + 1);
-                if (rp->symlink.subname == NULL) {
+                {
+                        size_t tmp_len = strlen(tmp);
+                        rp->symlink.subname = smb2_alloc_data(smb2, rp,
+                                                              tmp_len + 1);
+                        if (rp->symlink.subname == NULL) {
+                                free(discard_const(tmp));
+                                return -1;
+                        }
+                        memcpy(rp->symlink.subname, tmp, tmp_len + 1);
                         free(discard_const(tmp));
-                        return -1;
                 }
-                strcpy(rp->symlink.subname, tmp);
-                free(discard_const(tmp));
 
                 smb2_get_uint16(vec, 12, &printoffset);
                 smb2_get_uint16(vec, 14, &printlen);
@@ -103,14 +106,17 @@ smb2_decode_reparse_data_buffer(struct smb2_context *smb2,
                 }
                 tmp = smb2_utf16_to_utf8((uint16_t *)(void *)(&vec->buf[printoffset + 20]),
                                    printlen / 2);
-                rp->symlink.printname = smb2_alloc_data(smb2, rp,
-                                                        strlen(tmp) + 1);
-                if (rp->symlink.printname == NULL) {
+                {
+                        size_t tmp_len = strlen(tmp);
+                        rp->symlink.printname = smb2_alloc_data(smb2, rp,
+                                                                tmp_len + 1);
+                        if (rp->symlink.printname == NULL) {
+                                free(discard_const(tmp));
+                                return -1;
+                        }
+                        memcpy(rp->symlink.printname, tmp, tmp_len + 1);
                         free(discard_const(tmp));
-                        return -1;
                 }
-                strcpy(rp->symlink.printname, tmp);
-                free(discard_const(tmp));
         }
 
         return 0;

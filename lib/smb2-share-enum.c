@@ -154,15 +154,17 @@ smb2_share_enum_async(struct smb2_context *smb2,
         nse->cb = cb;
         nse->cb_data = cb_data;
 
-        server = malloc(strlen(smb2->server) + 3);
-        if (server == NULL) {
-                free(nse);
-                smb2_set_error(smb2, "Failed to allocate server");
-                dcerpc_destroy_context(dce);
-                return -ENOMEM;
+        {
+                size_t server_buf_len = strlen(smb2->server) + 3;
+                server = malloc(server_buf_len);
+                if (server == NULL) {
+                        free(nse);
+                        smb2_set_error(smb2, "Failed to allocate server");
+                        dcerpc_destroy_context(dce);
+                        return -ENOMEM;
+                }
+                snprintf(server, server_buf_len, "\\\\%s", smb2->server);
         }
-        
-        sprintf(server, "\\\\%s", smb2->server);
         nse->se_req.ServerName.utf8 = server;
 
         switch (level) {

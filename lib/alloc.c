@@ -88,6 +88,9 @@ smb2_alloc_init(struct smb2_context *smb2, size_t size)
 {
         struct smb2_alloc_header *ptr;
 
+        if (size > SIZE_MAX - offsetof(struct smb2_alloc_header, buf)) {
+                return NULL;
+        }
         size += offsetof(struct smb2_alloc_header, buf);
 
         ptr = calloc(size, 1);
@@ -104,6 +107,10 @@ smb2_alloc_data(struct smb2_context *smb2, void *memctx, size_t size)
         struct smb2_alloc_header *hdr;
         struct smb2_alloc_entry *ptr;
 
+        if (size > SIZE_MAX - offsetof(struct smb2_alloc_entry, buf)) {
+                smb2_set_error(smb2, "Allocation size overflow");
+                return NULL;
+        }
         size += offsetof(struct smb2_alloc_entry, buf);
 
         ptr = calloc(size, 1);
